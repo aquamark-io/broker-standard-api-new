@@ -477,17 +477,24 @@ async function deleteFromStorage(storagePath) {
 }
 
 async function trackUsage(userEmail, fileCount) {
-  const month = new Date().toISOString().slice(0, 7);
+  console.log('📊 trackUsage called:', { userEmail, fileCount });
   
-  const { data: existing } = await supabase
+  const month = new Date().toISOString().slice(0, 7);
+  console.log('📊 Month:', month);
+  
+  const { data: existing, error: selectError } = await supabase
     .from('broker_monthly_usage')
     .select('*')
     .eq('user_email', userEmail)
     .eq('month', month)
     .single();
   
+  console.log('📊 Existing record:', existing);
+  console.log('📊 Select error:', selectError);
+  
   if (existing) {
-    await supabase
+    console.log('📊 Updating existing record');
+    const { error: updateError } = await supabase
       .from('broker_monthly_usage')
       .update({
         files_processed: existing.files_processed + fileCount,
@@ -495,8 +502,10 @@ async function trackUsage(userEmail, fileCount) {
       })
       .eq('user_email', userEmail)
       .eq('month', month);
+    console.log('📊 Update error:', updateError);
   } else {
-    await supabase
+    console.log('📊 Inserting new record');
+    const { error: insertError } = await supabase
       .from('broker_monthly_usage')
       .insert({
         user_email: userEmail,
@@ -504,7 +513,10 @@ async function trackUsage(userEmail, fileCount) {
         files_processed: fileCount,
         last_updated: new Date().toISOString()
       });
+    console.log('📊 Insert error:', insertError);
   }
+  
+  console.log('📊 trackUsage completed');
 }
 
 async function processJobInBackground(jobId, userEmail, files) {
