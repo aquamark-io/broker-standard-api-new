@@ -608,6 +608,14 @@ app.post("/watermark", apiLimiter, validateWatermarkRequest, async (req, res) =>
     }
     
     const token = authHeader.split(" ")[1];
+    
+    // DEBUG: Log API key comparison
+    console.log('🔑 Received token:', token);
+    console.log('🔑 Expected token:', process.env.AQUAMARK_API_KEY);
+    console.log('🔑 Tokens match:', token === process.env.AQUAMARK_API_KEY);
+    console.log('🔑 Received length:', token.length);
+    console.log('🔑 Expected length:', process.env.AQUAMARK_API_KEY ? process.env.AQUAMARK_API_KEY.length : 'undefined');
+    
     if (token !== process.env.AQUAMARK_API_KEY) {
       return res.status(401).send("Invalid API key");
     }
