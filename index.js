@@ -635,9 +635,28 @@ async function processJobInBackground(jobId, userEmail, files) {
       resultFilename = watermarkedFiles[0].name;
     } else {
       const zip = new AdmZip();
+      const filenameCount = new Map(); // Track duplicate filenames
+      
       watermarkedFiles.forEach(file => {
-        zip.addFile(file.name, file.data);
+        let finalName = file.name;
+        
+        // Check if this filename already exists in the ZIP
+        if (filenameCount.has(file.name)) {
+          const count = filenameCount.get(file.name);
+          filenameCount.set(file.name, count + 1);
+          
+          // Add number suffix: chase-statement-protected.pdf -> chase-statement-protected-1.pdf
+          const lastDot = file.name.lastIndexOf('.');
+          const baseName = lastDot > 0 ? file.name.substring(0, lastDot) : file.name;
+          const extension = lastDot > 0 ? file.name.substring(lastDot) : '';
+          finalName = `${baseName}-${count}${extension}`;
+        } else {
+          filenameCount.set(file.name, 1);
+        }
+        
+        zip.addFile(finalName, file.data);
       });
+      
       resultBuffer = zip.toBuffer();
       resultFilename = 'watermarked-documents.zip';
     }
