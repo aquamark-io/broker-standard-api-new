@@ -451,7 +451,47 @@ async function updateJobStatus(jobId, status, data = {}) {
 }
 
 async function uploadToStorage(buffer, filename) {
-  const storagePath = `${crypto.randomUUID()}-${filename}`;
+  let storagePath = filename;
+  let attempt = 0;
+  const maxAttempts = 10;
+  
+  // Try to upload, if collision occurs, add number suffix
+  while (attempt < maxAttempts) {
+    const { error } = await supabase.storage
+      .from('broker-job-results')
+      .upload(storagePath, buffer, {
+        contentType: filename.endsWith('.zip') ? 'application/zip' : 'application/pdf',
+        cacheControl: '3600',
+        upsert: false // Don't overwrite - we want to detect collisions
+      });
+    
+    // Success - no collision
+    if (!error) {
+      const { data } = supabase.storage
+        .from('broker-job-results')
+        .getPublicUrl(storagePath);
+      
+      return { storagePath, downloadUrl: data.publicUrl };
+    }
+    
+    // If it's a collision error, try with a number
+    if (error.message && error.message.includes('already exists')) {
+      attempt++;
+      // Extract base name and extension
+      const lastDot = filename.lastIndexOf('.');
+      const baseName = lastDot > 0 ? filename.substring(0, lastDot) : filename;
+      const extension = lastDot > 0 ? filename.substring(lastDot) : '';
+      
+      storagePath = `${baseName}-${attempt}${extension}`;
+    } else {
+      // Some other error - throw it
+      throw error;
+    }
+  }
+  
+  // If we exhausted attempts, fall back to timestamp
+  const timestamp = Date.now();
+  storagePath = `${timestamp}-${filename}`;
   
   const { error } = await supabase.storage
     .from('broker-job-results')
