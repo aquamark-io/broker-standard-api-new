@@ -88,9 +88,9 @@ async function retryOperation(fn, maxRetries = 3, operationName = 'operation') {
 // RATE LIMITING
 // ============================================
 const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  message: 'Too many requests from this email. Please wait 15 minutes and try again.',
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 500, // 500 requests per hour per user
+  message: 'Too many requests from this email. Please wait and try again.',
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => {
@@ -102,8 +102,8 @@ const apiLimiter = rateLimit({
       ip: req.ip 
     });
     res.status(429).json({ 
-      error: 'Too many requests. Please wait 15 minutes and try again.',
-      retry_after: '15 minutes'
+      error: 'Too many requests. You have exceeded 500 requests per hour.',
+      retry_after: '1 hour'
     });
   }
 });
@@ -517,13 +517,9 @@ async function deleteFromStorage(storagePath) {
 }
 
 async function trackUsage(userEmail, fileCount, pageCount) {
-  console.log('📊 trackUsage called:', { userEmail, fileCount, pageCount });
-  
   const now = new Date();
   const year = now.getFullYear();
   const month = now.getMonth() + 1; // 1-12
-  
-  console.log('📊 Year:', year, 'Month:', month);
   
   const { data: existing, error: selectError } = await supabase
     .from('broker_monthly_usage')
@@ -533,12 +529,8 @@ async function trackUsage(userEmail, fileCount, pageCount) {
     .eq('month', month)
     .single();
   
-  console.log('📊 Existing record:', existing);
-  console.log('📊 Select error:', selectError);
-  
   if (existing) {
-    console.log('📊 Updating existing record');
-    const { error: updateError } = await supabase
+    await supabase
       .from('broker_monthly_usage')
       .update({
         file_count: existing.file_count + fileCount,
@@ -548,10 +540,8 @@ async function trackUsage(userEmail, fileCount, pageCount) {
       .eq('user_email', userEmail)
       .eq('year', year)
       .eq('month', month);
-    console.log('📊 Update error:', updateError);
   } else {
-    console.log('📊 Inserting new record');
-    const { error: insertError } = await supabase
+    await supabase
       .from('broker_monthly_usage')
       .insert({
         user_email: userEmail,
@@ -562,10 +552,7 @@ async function trackUsage(userEmail, fileCount, pageCount) {
         created_at: now.toISOString(),
         updated_at: now.toISOString()
       });
-    console.log('📊 Insert error:', insertError);
   }
-  
-  console.log('📊 trackUsage completed');
 }
 
 async function processJobInBackground(jobId, userEmail, files) {
@@ -697,14 +684,6 @@ app.post("/watermark", apiLimiter, validateWatermarkRequest, async (req, res) =>
     }
     
     const token = authHeader.split(" ")[1];
-    
-    // DEBUG: Log API key comparison
-    console.log('🔑 Received token:', token);
-    console.log('🔑 Expected token:', process.env.AQUAMARK_API_KEY);
-    console.log('🔑 Tokens match:', token === process.env.AQUAMARK_API_KEY);
-    console.log('🔑 Received length:', token.length);
-    console.log('🔑 Expected length:', process.env.AQUAMARK_API_KEY ? process.env.AQUAMARK_API_KEY.length : 'undefined');
-    
     if (token !== process.env.AQUAMARK_API_KEY) {
       return res.status(401).send("Invalid API key");
     }
