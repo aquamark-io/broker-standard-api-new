@@ -1,0 +1,27 @@
+{
+  "name": "aquamark-broker-funder",
+  "version": "1.0.0",
+  "description": "Broker Funder Watermarking Service for Aquamark",
+  "main": "index.js",
+  "scripts": {
+    "start": "node --max-old-space-size=1536 index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "express-fileupload": "^1.5.1",
+    "pdf-lib": "^1.17.1",
+    "node-fetch": "^2.6.7",
+    "@supabase/supabase-js": "^2.39.6",
+    "qrcode": "^1.5.1",
+    "sharp": "^0.33.0",
+    "adm-zip": "^0.5.10",
+    "express-rate-limit": "^7.1.5",
+    "winston": "^3.11.0",
+    "helmet": "^7.1.0",
+    "compression": "^1.7.4"
+  }
+}
