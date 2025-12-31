@@ -476,8 +476,8 @@ async function deleteFromStorage(storagePath) {
     .remove([storagePath]);
 }
 
-async function trackUsage(userEmail, fileCount) {
-  console.log('📊 trackUsage called:', { userEmail, fileCount });
+async function trackUsage(userEmail, fileCount, pageCount) {
+  console.log('📊 trackUsage called:', { userEmail, fileCount, pageCount });
   
   const now = new Date();
   const year = now.getFullYear();
@@ -502,6 +502,7 @@ async function trackUsage(userEmail, fileCount) {
       .from('broker_monthly_usage')
       .update({
         file_count: existing.file_count + fileCount,
+        page_count: existing.page_count + pageCount,
         updated_at: now.toISOString()
       })
       .eq('user_email', userEmail)
@@ -517,7 +518,7 @@ async function trackUsage(userEmail, fileCount) {
         year,
         month,
         file_count: fileCount,
-        page_count: 0, // We don't track pages in this API
+        page_count: pageCount,
         created_at: now.toISOString(),
         updated_at: now.toISOString()
       });
@@ -533,6 +534,7 @@ async function processJobInBackground(jobId, userEmail, files) {
     
     const logoBytes = await getCachedLogo(userEmail);
     const watermarkedFiles = [];
+    let totalPageCount = 0; // Track total pages
     
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
@@ -568,6 +570,14 @@ async function processJobInBackground(jobId, userEmail, files) {
       }
       
       const watermarkedPdf = await watermarkPdf(pdfBuffer, logoBytes, userEmail);
+      
+      // Count pages in the watermarked PDF
+      const watermarkedPdfDoc = await PDFDocument.load(watermarkedPdf, { 
+        updateMetadata: false 
+      });
+      const pageCount = watermarkedPdfDoc.getPageCount();
+      totalPageCount += pageCount;
+      
       watermarkedFiles.push({
         name: file.name.replace(/\.pdf$/i, '-protected.pdf'),
         data: Buffer.from(watermarkedPdf)
@@ -600,9 +610,9 @@ async function processJobInBackground(jobId, userEmail, files) {
       storage_path: storagePath
     });
     
-    await trackUsage(userEmail, files.length);
+    await trackUsage(userEmail, files.length, totalPageCount);
     
-    logger.info('Job completed', { jobId, userEmail, fileCount: files.length });
+    logger.info('Job completed', { jobId, userEmail, fileCount: files.length, pageCount: totalPageCount });
     
   } catch (error) {
     logger.error('Job failed', { jobId, error: error.message, stack: error.stack });
