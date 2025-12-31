@@ -555,7 +555,7 @@ async function trackUsage(userEmail, fileCount, pageCount) {
   }
 }
 
-async function processJobInBackground(jobId, userEmail, files) {
+async function processJobInBackground(jobId, userEmail, files, skipUsageTracking = false) {
   try {
     logger.info('Processing job', { jobId, userEmail, fileCount: files.length });
     
@@ -656,7 +656,9 @@ async function processJobInBackground(jobId, userEmail, files) {
       storage_path: storagePath
     });
     
-    await trackUsage(userEmail, files.length, totalPageCount);
+    if (!skipUsageTracking) {
+      await trackUsage(userEmail, files.length, totalPageCount);
+    }
     
     logger.info('Job completed', { jobId, userEmail, fileCount: files.length, pageCount: totalPageCount });
     
@@ -739,7 +741,8 @@ app.post("/watermark", apiLimiter, validateWatermarkRequest, async (req, res) =>
     logger.info('Job created', { jobId, userEmail, fileCount: files.length });
     
     // Start background processing
-    processJobInBackground(jobId, userEmail, files).catch(err => {
+    const skipUsageTracking = req.body.skip_usage_tracking || false;
+    processJobInBackground(jobId, userEmail, files, skipUsageTracking).catch(err => {
       logger.error('Background job failed', { jobId, error: err.message });
     });
     
