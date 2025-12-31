@@ -479,13 +479,17 @@ async function deleteFromStorage(storagePath) {
 async function trackUsage(userEmail, fileCount) {
   console.log('📊 trackUsage called:', { userEmail, fileCount });
   
-  const month = new Date().toISOString().slice(0, 7);
-  console.log('📊 Month:', month);
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth() + 1; // 1-12
+  
+  console.log('📊 Year:', year, 'Month:', month);
   
   const { data: existing, error: selectError } = await supabase
     .from('broker_monthly_usage')
     .select('*')
     .eq('user_email', userEmail)
+    .eq('year', year)
     .eq('month', month)
     .single();
   
@@ -497,10 +501,11 @@ async function trackUsage(userEmail, fileCount) {
     const { error: updateError } = await supabase
       .from('broker_monthly_usage')
       .update({
-        files_processed: existing.files_processed + fileCount,
-        last_updated: new Date().toISOString()
+        file_count: existing.file_count + fileCount,
+        updated_at: now.toISOString()
       })
       .eq('user_email', userEmail)
+      .eq('year', year)
       .eq('month', month);
     console.log('📊 Update error:', updateError);
   } else {
@@ -509,9 +514,12 @@ async function trackUsage(userEmail, fileCount) {
       .from('broker_monthly_usage')
       .insert({
         user_email: userEmail,
+        year,
         month,
-        files_processed: fileCount,
-        last_updated: new Date().toISOString()
+        file_count: fileCount,
+        page_count: 0, // We don't track pages in this API
+        created_at: now.toISOString(),
+        updated_at: now.toISOString()
       });
     console.log('📊 Insert error:', insertError);
   }
