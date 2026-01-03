@@ -32,6 +32,11 @@ const logoCache = new Map();
 const textImageCache = new Map();
 const authCache = new Map(); // Weekly auth caching
 
+// Job concurrency control
+let activeJobs = 0;
+const MAX_CONCURRENT_JOBS = 3; // Process max 3 jobs at once
+const jobQueue = [];
+
 // ============================================
 // STRUCTURED LOGGING
 // ============================================
@@ -494,9 +499,15 @@ async function uploadToStorage(buffer, filename) {
       const extension = lastDot > 0 ? filename.substring(lastDot) : '';
       
       storagePath = `${baseName}-${attempt}${extension}`;
+      logger.debug('Storage collision, retrying with suffix', { attempt, storagePath });
     } else {
-      // Some other error - throw it
-      throw error;
+      // Some other error - throw it with context
+      logger.error('Storage upload error (non-collision)', { 
+        error: error.message,
+        storagePath,
+        bufferSize: buffer.length 
+      });
+      throw new Error(`Storage upload failed: ${error.message}`);
     }
   }
   
@@ -512,7 +523,14 @@ async function uploadToStorage(buffer, filename) {
       upsert: false
     });
   
-  if (error) throw error;
+  if (error) {
+    logger.error('Storage upload failed', { 
+      storagePath, 
+      error: error.message,
+      bufferSize: buffer.length 
+    });
+    throw new Error(`Storage upload failed: ${error.message}`);
+  }
   
   const { data } = supabase.storage
     .from('broker-job-results')
@@ -567,6 +585,17 @@ async function trackUsage(userEmail, fileCount, pageCount) {
 }
 
 async function processJobInBackground(jobId, userEmail, files, skipUsageTracking = false) {
+  // Queue management - don't start if at max concurrency
+  if (activeJobs >= MAX_CONCURRENT_JOBS) {
+    logger.info('Job queued - at max concurrency', { jobId, activeJobs, queueLength: jobQueue.length });
+    return new Promise((resolve) => {
+      jobQueue.push({ jobId, userEmail, files, skipUsageTracking, resolve });
+    });
+  }
+  
+  activeJobs++;
+  logger.info('Job started', { jobId, activeJobs, queuedJobs: jobQueue.length });
+  
   try {
     logger.info('Processing job', { jobId, userEmail, fileCount: files.length });
     
@@ -679,7 +708,25 @@ async function processJobInBackground(jobId, userEmail, files, skipUsageTracking
     }
     
     await updateJobProgress(jobId, 'Uploading results...');
-    const { storagePath, downloadUrl } = await uploadToStorage(resultBuffer, resultFilename);
+    
+    // Upload with retry logic
+    let storagePath, downloadUrl;
+    try {
+      const uploadResult = await retryOperation(
+        async () => uploadToStorage(resultBuffer, resultFilename),
+        3,
+        `Storage upload for job ${jobId}`
+      );
+      storagePath = uploadResult.storagePath;
+      downloadUrl = uploadResult.downloadUrl;
+    } catch (uploadError) {
+      logger.error('Storage upload failed after retries', { 
+        jobId, 
+        error: uploadError.message,
+        fileSize: resultBuffer.length 
+      });
+      throw new Error(`Failed to upload results: ${uploadError.message}`);
+    }
     
     await updateJobStatus(jobId, 'complete', {
       download_url: downloadUrl,
@@ -697,6 +744,22 @@ async function processJobInBackground(jobId, userEmail, files, skipUsageTracking
     await updateJobStatus(jobId, 'error', {
       error_message: error.message
     });
+  } finally {
+    // Job finished - decrement counter and process queue
+    activeJobs--;
+    logger.info('Job finished', { jobId, activeJobs, queuedJobs: jobQueue.length });
+    
+    // Start next queued job if any
+    if (jobQueue.length > 0) {
+      const nextJob = jobQueue.shift();
+      logger.info('Starting queued job', { jobId: nextJob.jobId, remainingQueue: jobQueue.length });
+      processJobInBackground(nextJob.jobId, nextJob.userEmail, nextJob.files, nextJob.skipUsageTracking)
+        .then(nextJob.resolve)
+        .catch(err => {
+          logger.error('Queued job failed', { jobId: nextJob.jobId, error: err.message });
+          nextJob.resolve(); // Still resolve to prevent hanging
+        });
+    }
   }
 }
 
