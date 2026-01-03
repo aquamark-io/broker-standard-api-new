@@ -85,6 +85,18 @@ async function retryOperation(fn, maxRetries = 3, operationName = 'operation') {
 }
 
 // ============================================
+// TIMEOUT UTILITY FOR PDF PROCESSING
+// ============================================
+async function processWithTimeout(fn, timeoutMs = 60000, operationName = 'PDF operation') {
+  return Promise.race([
+    fn(),
+    new Promise((_, reject) => 
+      setTimeout(() => reject(new Error(`${operationName} timed out after ${timeoutMs/1000}s`)), timeoutMs)
+    )
+  ]);
+}
+
+// ============================================
 // RATE LIMITING
 // ============================================
 const apiLimiter = rateLimit({
@@ -137,6 +149,13 @@ function validateWatermarkRequest(req, res, next) {
 // ============================================
 // CACHE MANAGEMENT UTILITIES
 // ============================================
+
+// Validate PDF header
+function isValidPdf(buffer) {
+  if (!buffer || buffer.length < 5) return false;
+  const header = buffer.toString('utf8', 0, 5);
+  return header === '%PDF-';
+}
 
 // LRU cache: removes oldest entry when limit is reached
 function setWithLRULimit(cache, key, value, maxSize) {
@@ -368,11 +387,15 @@ async function watermarkPdf(pdfBuffer, logoBytes, userEmail) {
     cleanedPdfBytes = fs.readFileSync(cleanedPath);
     cleanupTempFiles(inPath, cleanedPath);
     
-    const pdfDoc = await PDFDocument.load(cleanedPdfBytes, {
-      ignoreEncryption: true,
-      updateMetadata: false,
-      throwOnInvalidObject: false
-    });
+    const pdfDoc = await processWithTimeout(
+      () => PDFDocument.load(cleanedPdfBytes, {
+        ignoreEncryption: true,
+        updateMetadata: false,
+        throwOnInvalidObject: false
+      }),
+      60000,
+      'PDF load'
+    );
     
     cleanedPdfBytes = null; // Release memory
     
@@ -610,7 +633,7 @@ async function processJobInBackground(jobId, userEmail, files, skipUsageTracking
         }
         
         // Validate it's actually a PDF (separate from base64 validation)
-        if (!pdfBuffer.toString('utf8', 0, 4).includes('PDF')) {
+        if (!isValidPdf(pdfBuffer)) {
           throw new Error(`File '${file.name}' is not a valid PDF (corrupt or wrong file type)`);
         }
       }
@@ -646,12 +669,20 @@ async function processJobInBackground(jobId, userEmail, files, skipUsageTracking
         throw new Error(`File '${file.name}' exceeds 25MB limit`);
       }
       
-      const watermarkedPdf = await watermarkPdf(pdfBuffer, logoBytes, userEmail);
+      const watermarkedPdf = await processWithTimeout(
+        () => watermarkPdf(pdfBuffer, logoBytes, userEmail),
+        90000, // 90 seconds for watermarking (includes qpdf + pdf-lib operations)
+        `Watermarking ${file.name}`
+      );
       
       // Count pages in the watermarked PDF
-      const watermarkedPdfDoc = await PDFDocument.load(watermarkedPdf, { 
-        updateMetadata: false 
-      });
+      const watermarkedPdfDoc = await processWithTimeout(
+        () => PDFDocument.load(watermarkedPdf, { 
+          updateMetadata: false 
+        }),
+        30000, // 30 seconds for loading (just counting pages)
+        `Loading watermarked PDF for page count`
+      );
       const pageCount = watermarkedPdfDoc.getPageCount();
       totalPageCount += pageCount;
       
