@@ -572,85 +572,29 @@ async function deleteFromStorage(storagePath) {
 
 async function trackUsage(userEmail, fileCount, pageCount) {
   const now = new Date();
+  const month = now.getMonth() + 1;
   const year = now.getFullYear();
-  const month = now.getMonth() + 1; // 1-12
   
-  // Retry logic to handle concurrent updates
-  let attempts = 0;
-  const maxAttempts = 5;
-  
-  while (attempts < maxAttempts) {
-    try {
-      // Read current value
-      const { data: existing, error: selectError } = await supabase
-        .from('broker_monthly_usage')
-        .select('*')
-        .eq('user_email', userEmail)
-        .eq('year', year)
-        .eq('month', month)
-        .single();
-      
-      if (existing) {
-        // Update existing record
-        const { error: updateError } = await supabase
-          .from('broker_monthly_usage')
-          .update({
-            file_count: existing.file_count + fileCount,
-            page_count: existing.page_count + pageCount,
-            updated_at: now.toISOString()
-          })
-          .eq('user_email', userEmail)
-          .eq('year', year)
-          .eq('month', month)
-          .eq('updated_at', existing.updated_at); // Optimistic locking
-        
-        if (!updateError) {
-          return; // Success
-        }
-        // If update failed due to concurrent modification, retry
-      } else {
-        // Insert new record
-        const { error: insertError } = await supabase
-          .from('broker_monthly_usage')
-          .insert({
-            user_email: userEmail,
-            year,
-            month,
-            file_count: fileCount,
-            page_count: pageCount,
-            created_at: now.toISOString(),
-            updated_at: now.toISOString()
-          });
-        
-        if (!insertError) {
-          return; // Success
-        }
-        // If insert failed (race condition), retry
-      }
-      
-      attempts++;
-      if (attempts < maxAttempts) {
-        // Exponential backoff with jitter
-        await new Promise(resolve => setTimeout(resolve, 100 * Math.pow(2, attempts) * Math.random()));
-      }
-      
-    } catch (error) {
-      logger.error('Usage tracking attempt failed', { 
-        attempt: attempts, 
-        error: error.message 
-      });
-      attempts++;
+  try {
+    // Use atomic increment function to prevent race conditions during concurrent updates
+    const { error } = await supabase.rpc('increment_monthly_usage', {
+      p_user_email: userEmail,
+      p_month: month,
+      p_year: year,
+      p_file_count: fileCount,
+      p_page_count: pageCount
+    });
+    
+    if (error) {
+      logger.error('Error updating monthly usage', { error: error.message, userEmail });
+      throw error;
     }
+    
+    logger.info('Updated monthly usage', { userEmail, fileCount, pageCount });
+  } catch (err) {
+    logger.error('Error updating monthly usage', { error: err.message, userEmail });
+    // Don't throw - we don't want to fail the job if usage tracking fails
   }
-  
-  logger.error('Usage tracking failed after retries', { 
-    userEmail, 
-    year, 
-    month, 
-    fileCount, 
-    pageCount 
-  });
-  // Don't throw - usage tracking shouldn't fail the job
 }
 
 async function processJobInBackground(jobId, userEmail, files, skipUsageTracking = false) {
