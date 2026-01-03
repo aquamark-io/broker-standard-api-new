@@ -456,13 +456,20 @@ async function updateJobProgress(jobId, progress) {
 }
 
 async function updateJobStatus(jobId, status, data = {}) {
+  const update = {
+    status,
+    ...data,
+    completed_at: new Date().toISOString()
+  };
+  
+  // Clear progress when job is complete or error
+  if (status === 'complete' || status === 'error') {
+    update.progress = null;
+  }
+  
   await supabase
     .from('broker_jobs')
-    .update({
-      status,
-      ...data,
-      completed_at: new Date().toISOString()
-    })
+    .update(update)
     .eq('id', jobId);
 }
 
@@ -704,7 +711,7 @@ async function processJobInBackground(jobId, userEmail, files, skipUsageTracking
       });
       
       resultBuffer = zip.toBuffer();
-      resultFilename = 'watermarked-documents.zip';
+      resultFilename = `${jobId}.zip`; // Use full jobId for guaranteed uniqueness
     }
     
     await updateJobProgress(jobId, 'Uploading results...');
@@ -712,6 +719,7 @@ async function processJobInBackground(jobId, userEmail, files, skipUsageTracking
     // Upload with retry logic
     let storagePath, downloadUrl;
     try {
+      logger.info('Starting storage upload', { jobId, filename: resultFilename, size: resultBuffer.length });
       const uploadResult = await retryOperation(
         async () => uploadToStorage(resultBuffer, resultFilename),
         3,
@@ -719,6 +727,7 @@ async function processJobInBackground(jobId, userEmail, files, skipUsageTracking
       );
       storagePath = uploadResult.storagePath;
       downloadUrl = uploadResult.downloadUrl;
+      logger.info('Storage upload successful', { jobId, storagePath, downloadUrl });
     } catch (uploadError) {
       logger.error('Storage upload failed after retries', { 
         jobId, 
