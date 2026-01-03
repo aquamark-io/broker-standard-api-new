@@ -575,38 +575,82 @@ async function trackUsage(userEmail, fileCount, pageCount) {
   const year = now.getFullYear();
   const month = now.getMonth() + 1; // 1-12
   
-  const { data: existing, error: selectError } = await supabase
-    .from('broker_monthly_usage')
-    .select('*')
-    .eq('user_email', userEmail)
-    .eq('year', year)
-    .eq('month', month)
-    .single();
+  // Retry logic to handle concurrent updates
+  let attempts = 0;
+  const maxAttempts = 5;
   
-  if (existing) {
-    await supabase
-      .from('broker_monthly_usage')
-      .update({
-        file_count: existing.file_count + fileCount,
-        page_count: existing.page_count + pageCount,
-        updated_at: now.toISOString()
-      })
-      .eq('user_email', userEmail)
-      .eq('year', year)
-      .eq('month', month);
-  } else {
-    await supabase
-      .from('broker_monthly_usage')
-      .insert({
-        user_email: userEmail,
-        year,
-        month,
-        file_count: fileCount,
-        page_count: pageCount,
-        created_at: now.toISOString(),
-        updated_at: now.toISOString()
+  while (attempts < maxAttempts) {
+    try {
+      // Read current value
+      const { data: existing, error: selectError } = await supabase
+        .from('broker_monthly_usage')
+        .select('*')
+        .eq('user_email', userEmail)
+        .eq('year', year)
+        .eq('month', month)
+        .single();
+      
+      if (existing) {
+        // Update existing record
+        const { error: updateError } = await supabase
+          .from('broker_monthly_usage')
+          .update({
+            file_count: existing.file_count + fileCount,
+            page_count: existing.page_count + pageCount,
+            updated_at: now.toISOString()
+          })
+          .eq('user_email', userEmail)
+          .eq('year', year)
+          .eq('month', month)
+          .eq('updated_at', existing.updated_at); // Optimistic locking
+        
+        if (!updateError) {
+          return; // Success
+        }
+        // If update failed due to concurrent modification, retry
+      } else {
+        // Insert new record
+        const { error: insertError } = await supabase
+          .from('broker_monthly_usage')
+          .insert({
+            user_email: userEmail,
+            year,
+            month,
+            file_count: fileCount,
+            page_count: pageCount,
+            created_at: now.toISOString(),
+            updated_at: now.toISOString()
+          });
+        
+        if (!insertError) {
+          return; // Success
+        }
+        // If insert failed (race condition), retry
+      }
+      
+      attempts++;
+      if (attempts < maxAttempts) {
+        // Exponential backoff with jitter
+        await new Promise(resolve => setTimeout(resolve, 100 * Math.pow(2, attempts) * Math.random()));
+      }
+      
+    } catch (error) {
+      logger.error('Usage tracking attempt failed', { 
+        attempt: attempts, 
+        error: error.message 
       });
+      attempts++;
+    }
   }
+  
+  logger.error('Usage tracking failed after retries', { 
+    userEmail, 
+    year, 
+    month, 
+    fileCount, 
+    pageCount 
+  });
+  // Don't throw - usage tracking shouldn't fail the job
 }
 
 async function processJobInBackground(jobId, userEmail, files, skipUsageTracking = false) {
