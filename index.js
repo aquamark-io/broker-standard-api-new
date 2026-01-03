@@ -32,11 +32,6 @@ const logoCache = new Map();
 const textImageCache = new Map();
 const authCache = new Map(); // Weekly auth caching
 
-// Job concurrency control
-let activeJobs = 0;
-const MAX_CONCURRENT_JOBS = 3; // Process max 3 jobs at once
-const jobQueue = [];
-
 // ============================================
 // STRUCTURED LOGGING
 // ============================================
@@ -592,17 +587,6 @@ async function trackUsage(userEmail, fileCount, pageCount) {
 }
 
 async function processJobInBackground(jobId, userEmail, files, skipUsageTracking = false) {
-  // Queue management - don't start if at max concurrency
-  if (activeJobs >= MAX_CONCURRENT_JOBS) {
-    logger.info('Job queued - at max concurrency', { jobId, activeJobs, queueLength: jobQueue.length });
-    return new Promise((resolve) => {
-      jobQueue.push({ jobId, userEmail, files, skipUsageTracking, resolve });
-    });
-  }
-  
-  activeJobs++;
-  logger.info('Job started', { jobId, activeJobs, queuedJobs: jobQueue.length });
-  
   try {
     logger.info('Processing job', { jobId, userEmail, fileCount: files.length });
     
@@ -753,22 +737,6 @@ async function processJobInBackground(jobId, userEmail, files, skipUsageTracking
     await updateJobStatus(jobId, 'error', {
       error_message: error.message
     });
-  } finally {
-    // Job finished - decrement counter and process queue
-    activeJobs--;
-    logger.info('Job finished', { jobId, activeJobs, queuedJobs: jobQueue.length });
-    
-    // Start next queued job if any
-    if (jobQueue.length > 0) {
-      const nextJob = jobQueue.shift();
-      logger.info('Starting queued job', { jobId: nextJob.jobId, remainingQueue: jobQueue.length });
-      processJobInBackground(nextJob.jobId, nextJob.userEmail, nextJob.files, nextJob.skipUsageTracking)
-        .then(nextJob.resolve)
-        .catch(err => {
-          logger.error('Queued job failed', { jobId: nextJob.jobId, error: err.message });
-          nextJob.resolve(); // Still resolve to prevent hanging
-        });
-    }
   }
 }
 
