@@ -341,7 +341,7 @@ async function watermarkPdf(pdfBuffer, logoBytes, userEmail) {
     fs.writeFileSync(inPath, pdfBuffer);
     
     await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("PDF processing timeout")), 15000);
+      const timeout = setTimeout(() => reject(new Error("PDF processing timeout (>30 seconds)")), 30000); // Increased from 15s to 30s
       
       exec(`qpdf --decrypt "${inPath}" "${cleanedPath}"`, (error, stdout, stderr) => {
         clearTimeout(timeout);
@@ -349,7 +349,18 @@ async function watermarkPdf(pdfBuffer, logoBytes, userEmail) {
         if (fs.existsSync(cleanedPath) && fs.statSync(cleanedPath).size > 0) {
           resolve();
         } else {
-          reject(new Error(`Unable to process PDF: ${stderr || error?.message || 'Unknown error'}`));
+          const stderrStr = stderr?.toString() || '';
+          const errorStr = error?.message || '';
+          
+          // Check for password-protected PDF
+          if (stderrStr.includes('password') || 
+              stderrStr.includes('encrypted') || 
+              stderrStr.includes('Invalid password') ||
+              errorStr.includes('password')) {
+            reject(new Error('This PDF is password-protected. Please remove the password and try again.'));
+          } else {
+            reject(new Error(`Unable to process PDF: ${stderrStr || errorStr || 'Unknown error'}`));
+          }
         }
       });
     });
@@ -574,21 +585,40 @@ async function processJobInBackground(jobId, userEmail, files, skipUsageTracking
         try {
           const base64Data = file.data.replace(/^data:application\/pdf;base64,/, '');
           pdfBuffer = Buffer.from(base64Data, 'base64');
-          
-          if (!pdfBuffer.toString('utf8', 0, 4).includes('PDF')) {
-            throw new Error(`File '${file.name}' is not a valid PDF`);
-          }
         } catch (error) {
-          throw new Error(`File '${file.name}' has invalid base64 encoding`);
+          throw new Error(`File '${file.name}' has invalid base64 encoding: ${error.message}`);
+        }
+        
+        // Validate it's actually a PDF (separate from base64 validation)
+        if (!pdfBuffer.toString('utf8', 0, 4).includes('PDF')) {
+          throw new Error(`File '${file.name}' is not a valid PDF (corrupt or wrong file type)`);
         }
       }
       // Handle URL
       else if (file.url) {
-        const response = await fetch(file.url);
-        if (!response.ok) {
-          throw new Error(`Failed to download file '${file.name}' from URL`);
-        }
-        pdfBuffer = Buffer.from(await response.arrayBuffer());
+        pdfBuffer = await retryOperation(async () => {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+          
+          try {
+            const response = await fetch(file.url, { signal: controller.signal });
+            clearTimeout(timeout);
+            
+            if (!response.ok) {
+              throw new Error(`Failed to download file '${file.name}' from URL (HTTP ${response.status})`);
+            }
+            
+            const buffer = Buffer.from(await response.arrayBuffer());
+            logger.info('File downloaded successfully', { filename: file.name, size: buffer.length });
+            return buffer;
+          } catch (error) {
+            clearTimeout(timeout);
+            if (error.name === 'AbortError') {
+              throw new Error(`Download timeout for '${file.name}' (>30 seconds)`);
+            }
+            throw error;
+          }
+        }, 3, `Download ${file.name}`);
       }
       
       // Validate file size
