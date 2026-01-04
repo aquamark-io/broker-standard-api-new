@@ -81,20 +81,12 @@ function validateWatermarkRequest(req, res, next) {
 // ============================================
 
 async function fetchWithTimeout(url, timeout = 30000) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeout);
-  
-  try {
-    const response = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeoutId);
-    return response;
-  } catch (error) {
-    clearTimeout(timeoutId);
-    if (error.name === 'AbortError') {
-      throw new Error('Fetch timeout after 30 seconds');
-    }
-    throw error;
-  }
+  return Promise.race([
+    fetch(url),
+    new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Fetch timeout after 30 seconds')), timeout)
+    )
+  ]);
 }
 
 async function getCachedLogo(userEmail) {
@@ -182,10 +174,7 @@ if (!isValid) {
 // Continue with processing...
 
 // ============================================
-// REQUIRED DEPENDENCY
+// NO EXTERNAL DEPENDENCIES REQUIRED
 // ============================================
-// Add to package.json: "abort-controller": "^3.0.0"
-// Then: npm install abort-controller
-
-// At top of file add:
-const AbortController = require('abort-controller');
+// All patches use native Promise.race for timeouts
+// No need to install additional packages
