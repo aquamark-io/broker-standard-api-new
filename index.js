@@ -215,19 +215,18 @@ setInterval(cleanExpiredAuthCache, 60 * 60 * 1000);
 function addAquamarkMetadata(pdfDoc, userEmail) {
   const { PDFName, PDFString } = require('pdf-lib');
   
-  const domain = userEmail.split('@')[1] || userEmail;
   const timestamp = new Date().toISOString();
   
   const infoDict = pdfDoc.getInfoDict();
   
   infoDict.set(PDFName.of('AquamarkProtected'), PDFString.of('true'));
-  infoDict.set(PDFName.of('AquamarkBroker'), PDFString.of(domain));
+  infoDict.set(PDFName.of('AquamarkBroker'), PDFString.of(userEmail)); // Changed: use full email instead of domain
   infoDict.set(PDFName.of('AquamarkTimestamp'), PDFString.of(timestamp));
   
   const existingKeywords = infoDict.get(PDFName.of('Keywords'));
   const keywordsText = existingKeywords ? existingKeywords.toString() : '';
   
-  const aquamarkKeywords = `AquamarkProtected: true, AquamarkBroker: ${domain}`;
+  const aquamarkKeywords = `AquamarkProtected: true, AquamarkBroker: ${userEmail}`; // Changed: use full email instead of domain
   const newKeywords = keywordsText 
     ? `${keywordsText}, ${aquamarkKeywords}`
     : aquamarkKeywords;
