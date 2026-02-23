@@ -85,6 +85,63 @@ async function retryOperation(fn, maxRetries = 3, operationName = 'operation') {
 }
 
 // ============================================
+// WEBHOOK DELIVERY
+// ============================================
+async function deliverWebhook(webhookUrl, payload) {
+  const payloadString = JSON.stringify(payload);
+  
+  const signature = crypto
+    .createHmac('sha256', process.env.AQUAMARK_API_KEY)
+    .update(payloadString)
+    .digest('hex');
+  
+  const headers = {
+    'Content-Type': 'application/json',
+    'X-Aquamark-Signature': signature,
+    'X-Aquamark-Event': payload.event,
+    'X-Aquamark-Delivery': crypto.randomUUID(),
+    'User-Agent': 'Aquamark-Webhooks/1.0'
+  };
+  
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const response = await fetch(webhookUrl, {
+        method: 'POST',
+        headers,
+        body: payloadString,
+        timeout: 10000
+      });
+      
+      if (response.ok) {
+        logger.info('Webhook delivered', { 
+          webhookUrl, event: payload.event, jobId: payload.job_id, attempt, statusCode: response.status
+        });
+        return { success: true, statusCode: response.status, attempt };
+      }
+      
+      if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+        logger.warn('Webhook rejected by client', { webhookUrl, statusCode: response.status, jobId: payload.job_id });
+        return { success: false, statusCode: response.status, attempt };
+      }
+      
+      throw new Error(`Webhook endpoint returned ${response.status}`);
+      
+    } catch (error) {
+      if (attempt === 3) {
+        logger.error('Webhook delivery failed after retries', { 
+          webhookUrl, event: payload.event, jobId: payload.job_id, error: error.message
+        });
+        return { success: false, error: error.message, attempt };
+      }
+      
+      const delayMs = 2000 * Math.pow(2, attempt - 1);
+      logger.warn('Webhook delivery failed, retrying', { webhookUrl, attempt, delayMs, error: error.message });
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
+// ============================================
 // TIMEOUT UTILITY FOR PDF PROCESSING
 // ============================================
 async function processWithTimeout(fn, timeoutMs = 60000, operationName = 'PDF operation') {
@@ -453,16 +510,22 @@ async function watermarkPdf(pdfBuffer, logoBytes, userEmail) {
   }
 }
 
-async function createJob(jobId, userEmail) {
+async function createJob(jobId, userEmail, webhookUrl = null) {
+  const jobData = {
+    id: jobId,
+    user_email: userEmail,
+    status: 'processing',
+    progress: 'Job created',
+    created_at: new Date().toISOString()
+  };
+  
+  if (webhookUrl) {
+    jobData.webhook_url = webhookUrl;
+  }
+  
   await supabase
     .from('broker_jobs')
-    .insert({
-      id: jobId,
-      user_email: userEmail,
-      status: 'processing',
-      progress: 'Job created',
-      created_at: new Date().toISOString()
-    });
+    .insert(jobData);
 }
 
 async function updateJobProgress(jobId, progress) {
@@ -596,8 +659,9 @@ async function trackUsage(userEmail, fileCount, pageCount) {
   }
 }
 
-async function processJobInBackground(jobId, userEmail, files, skipUsageTracking = false) {
+async function processJobInBackground(jobId, userEmail, files, skipUsageTracking = false, webhookUrl = null) {
   try {
+    const startTime = Date.now();
     logger.info('Processing job', { jobId, userEmail, fileCount: files.length });
     
     const logoBytes = await getCachedLogo(userEmail);
@@ -750,11 +814,35 @@ async function processJobInBackground(jobId, userEmail, files, skipUsageTracking
     
     logger.info('Job completed', { jobId, userEmail, fileCount: files.length, pageCount: totalPageCount });
     
+    // Deliver webhook if URL was provided
+    if (webhookUrl) {
+      await deliverWebhook(webhookUrl, {
+        event: 'job.completed',
+        job_id: jobId,
+        status: 'complete',
+        download_url: downloadUrl,
+        file_count: files.length,
+        elapsed_ms: Date.now() - startTime,
+        completed_at: new Date().toISOString()
+      });
+    }
+    
   } catch (error) {
     logger.error('Job failed', { jobId, error: error.message, stack: error.stack });
     await updateJobStatus(jobId, 'error', {
       error_message: error.message
     });
+    
+    // Deliver webhook on failure if URL was provided
+    if (webhookUrl) {
+      await deliverWebhook(webhookUrl, {
+        event: 'job.failed',
+        job_id: jobId,
+        status: 'error',
+        error_message: error.message,
+        completed_at: new Date().toISOString()
+      });
+    }
   }
 }
 
@@ -766,6 +854,19 @@ app.post("/watermark", apiLimiter, validateWatermarkRequest, async (req, res) =>
   try {
     const userEmail = req.body.user_email;
     const filesParam = req.body.files;
+    const webhookUrl = req.body.webhook_url || null;
+    
+    // Validate webhook URL if provided (must be HTTPS)
+    if (webhookUrl) {
+      try {
+        const parsed = new URL(webhookUrl);
+        if (parsed.protocol !== 'https:') {
+          return res.status(400).json({ error: 'webhook_url must use HTTPS' });
+        }
+      } catch {
+        return res.status(400).json({ error: 'webhook_url is not a valid URL' });
+      }
+    }
     
     // Check API key
     const authHeader = req.headers["authorization"];
@@ -824,13 +925,13 @@ app.post("/watermark", apiLimiter, validateWatermarkRequest, async (req, res) =>
     
     // Create job
     const jobId = crypto.randomUUID();
-    await createJob(jobId, userEmail);
+    await createJob(jobId, userEmail, webhookUrl);
     
     logger.info('Job created', { jobId, userEmail, fileCount: files.length });
     
     // Start background processing
     const skipUsageTracking = req.body.skip_usage_tracking || false;
-    processJobInBackground(jobId, userEmail, files, skipUsageTracking).catch(err => {
+    processJobInBackground(jobId, userEmail, files, skipUsageTracking, webhookUrl).catch(err => {
       logger.error('Background job failed', { jobId, error: err.message });
     });
     
@@ -838,7 +939,10 @@ app.post("/watermark", apiLimiter, validateWatermarkRequest, async (req, res) =>
       job_id: jobId,
       status: 'processing',
       file_count: files.length,
-      message: 'Job created successfully. Poll /job-status/{job_id} for updates.'
+      webhook_url: webhookUrl,
+      message: webhookUrl
+        ? 'Job created successfully. You will receive a webhook when processing completes.'
+        : 'Job created successfully. Poll /job-status/{job_id} for updates.'
     });
     
   } catch (err) {
