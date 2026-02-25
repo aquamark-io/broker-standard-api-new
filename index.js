@@ -32,6 +32,9 @@ const logoCache = new Map();
 const textImageCache = new Map();
 const authCache = new Map(); // Weekly auth caching
 
+// Signed URL configuration
+const SIGNED_URL_EXPIRY_SECONDS = 600; // 10 minutes
+
 // ============================================
 // STRUCTURED LOGGING
 // ============================================
@@ -83,6 +86,135 @@ async function retryOperation(fn, maxRetries = 3, operationName = 'operation') {
     }
   }
 }
+
+// ============================================
+// ACCESS LOGGING
+// ============================================
+
+async function logFileAccess(jobId, userEmail, action, metadata = {}) {
+  try {
+    const { error } = await supabase
+      .from('download_access_log')
+      .insert({
+        job_id: jobId,
+        user_email: userEmail,
+        action,
+        ip_address: metadata.ip || null,
+        signed_url_expires_at: metadata.signedUrlExpiresAt || null,
+        metadata: metadata.extra || null,
+        created_at: new Date().toISOString()
+      });
+    
+    if (error) {
+      logger.error('Failed to log file access', { jobId, action, error: error.message });
+    }
+  } catch (err) {
+    logger.error('Access logging exception', { jobId, action, error: err.message });
+  }
+}
+
+async function generateSignedUrl(storagePath) {
+  const { data, error } = await supabase.storage
+    .from('broker-job-results')
+    .createSignedUrl(storagePath, SIGNED_URL_EXPIRY_SECONDS);
+  
+  if (error) throw new Error('Failed to generate signed URL: ' + error.message);
+  
+  const expiresAt = new Date(Date.now() + SIGNED_URL_EXPIRY_SECONDS * 1000).toISOString();
+  return { signedUrl: data.signedUrl, expiresAt };
+}
+
+// ============================================
+// AUTO-CLEANUP: Delete expired files from storage
+// ============================================
+
+async function cleanupExpiredFiles() {
+  try {
+    const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    
+    const { data: expiredJobs, error } = await supabase
+      .from('broker_jobs')
+      .select('id, storage_path, user_email')
+      .eq('status', 'complete')
+      .not('storage_path', 'is', null)
+      .lt('completed_at', thirtyMinutesAgo);
+    
+    if (error) {
+      logger.error('Cleanup query failed', { error: error.message });
+      return;
+    }
+    
+    if (!expiredJobs || expiredJobs.length === 0) return;
+    
+    logger.info('Cleanup: found expired files', { count: expiredJobs.length });
+    
+    for (const job of expiredJobs) {
+      try {
+        await deleteFromStorage(job.storage_path);
+        
+        await supabase
+          .from('broker_jobs')
+          .update({ storage_path: null, download_url: null })
+          .eq('id', job.id);
+        
+        await logFileAccess(job.id, job.user_email, 'file_expired', {
+          extra: { reason: 'auto_cleanup_30min' }
+        });
+        
+        logger.info('Cleanup: deleted expired file', { jobId: job.id });
+      } catch (delErr) {
+        logger.error('Cleanup: failed to delete file', { jobId: job.id, error: delErr.message });
+      }
+    }
+  } catch (err) {
+    logger.error('Cleanup sweep failed', { error: err.message });
+  }
+}
+
+setInterval(cleanupExpiredFiles, 5 * 60 * 1000);
+
+// ============================================
+// ACCESS LOG PURGE: Delete logs older than 90 days
+// ============================================
+
+const LOG_RETENTION_DAYS = 90;
+let lastLogPurge = 0;
+
+async function purgeOldAccessLogs() {
+  try {
+    const now = Date.now();
+    if (now - lastLogPurge < 24 * 60 * 60 * 1000) return;
+    lastLogPurge = now;
+    
+    const cutoff = new Date(now - LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    
+    const { error: logError, count: logCount } = await supabase
+      .from('download_access_log')
+      .delete()
+      .lt('created_at', cutoff);
+    
+    if (logError) {
+      logger.error('Log purge failed', { error: logError.message });
+    } else if (logCount > 0) {
+      logger.info('Access logs purged', { deletedCount: logCount, olderThan: cutoff });
+    }
+    
+    const { error: jobError, count: jobCount } = await supabase
+      .from('broker_jobs')
+      .delete()
+      .lt('created_at', cutoff);
+    
+    if (jobError) {
+      logger.error('Job record purge failed', { error: jobError.message });
+    } else if (jobCount > 0) {
+      logger.info('Job records purged', { deletedCount: jobCount, olderThan: cutoff });
+    }
+  } catch (err) {
+    logger.error('Log purge exception', { error: err.message });
+  }
+}
+
+setInterval(purgeOldAccessLogs, 5 * 60 * 1000);
 
 // ============================================
 // WEBHOOK DELIVERY
@@ -177,6 +309,7 @@ const apiLimiter = rateLimit({
   }
 });
 
+app.set('trust proxy', true);
 app.use(helmet());
 app.use(compression());
 app.use(express.json({ limit: '200mb' })); // Support base64
@@ -554,76 +687,18 @@ async function updateJobStatus(jobId, status, data = {}) {
 }
 
 async function uploadToStorage(buffer, filename) {
-  let storagePath = filename;
-  let attempt = 0;
-  const maxAttempts = 10;
-  
-  // Try to upload, if collision occurs, add number suffix
-  while (attempt < maxAttempts) {
-    const { error } = await supabase.storage
-      .from('broker-job-results')
-      .upload(storagePath, buffer, {
-        contentType: filename.endsWith('.zip') ? 'application/zip' : 'application/pdf',
-        cacheControl: '3600',
-        upsert: false // Don't overwrite - we want to detect collisions
-      });
-    
-    // Success - no collision
-    if (!error) {
-      const { data } = supabase.storage
-        .from('broker-job-results')
-        .getPublicUrl(storagePath);
-      
-      return { storagePath, downloadUrl: data.publicUrl };
-    }
-    
-    // If it's a collision error, try with a number
-    if (error.message && error.message.includes('already exists')) {
-      attempt++;
-      // Extract base name and extension
-      const lastDot = filename.lastIndexOf('.');
-      const baseName = lastDot > 0 ? filename.substring(0, lastDot) : filename;
-      const extension = lastDot > 0 ? filename.substring(lastDot) : '';
-      
-      storagePath = `${baseName}-${attempt}${extension}`;
-      logger.debug('Storage collision, retrying with suffix', { attempt, storagePath });
-    } else {
-      // Some other error - throw it with context
-      logger.error('Storage upload error (non-collision)', { 
-        error: error.message,
-        storagePath,
-        bufferSize: buffer.length 
-      });
-      throw new Error(`Storage upload failed: ${error.message}`);
-    }
-  }
-  
-  // If we exhausted attempts, fall back to timestamp
-  const timestamp = Date.now();
-  storagePath = `${timestamp}-${filename}`;
+  const storagePath = filename;
   
   const { error } = await supabase.storage
     .from('broker-job-results')
     .upload(storagePath, buffer, {
       contentType: filename.endsWith('.zip') ? 'application/zip' : 'application/pdf',
-      cacheControl: '3600',
-      upsert: false
+      upsert: true
     });
   
-  if (error) {
-    logger.error('Storage upload failed', { 
-      storagePath, 
-      error: error.message,
-      bufferSize: buffer.length 
-    });
-    throw new Error(`Storage upload failed: ${error.message}`);
-  }
+  if (error) throw new Error(`Storage upload failed: ${error.message}`);
   
-  const { data } = supabase.storage
-    .from('broker-job-results')
-    .getPublicUrl(storagePath);
-  
-  return { storagePath, downloadUrl: data.publicUrl };
+  return { storagePath };
 }
 
 async function deleteFromStorage(storagePath) {
@@ -783,7 +858,7 @@ async function processJobInBackground(jobId, userEmail, files, skipUsageTracking
     await updateJobProgress(jobId, 'Uploading results...');
     
     // Upload with retry logic
-    let storagePath, downloadUrl;
+    let storagePath;
     try {
       logger.info('Starting storage upload', { jobId, filename: resultFilename, size: resultBuffer.length });
       const uploadResult = await retryOperation(
@@ -792,8 +867,7 @@ async function processJobInBackground(jobId, userEmail, files, skipUsageTracking
         `Storage upload for job ${jobId}`
       );
       storagePath = uploadResult.storagePath;
-      downloadUrl = uploadResult.downloadUrl;
-      logger.info('Storage upload successful', { jobId, storagePath, downloadUrl });
+      logger.info('Storage upload successful', { jobId, storagePath });
     } catch (uploadError) {
       logger.error('Storage upload failed after retries', { 
         jobId, 
@@ -803,16 +877,26 @@ async function processJobInBackground(jobId, userEmail, files, skipUsageTracking
       throw new Error(`Failed to upload results: ${uploadError.message}`);
     }
     
+    // Generate signed URL (time-limited, not public)
+    const { signedUrl, expiresAt } = await generateSignedUrl(storagePath);
+    
     await updateJobStatus(jobId, 'complete', {
-      download_url: downloadUrl,
+      download_url: signedUrl,
       storage_path: storagePath
+    });
+    
+    // Log the signed URL generation
+    await logFileAccess(jobId, userEmail, 'link_generated', {
+      signedUrlExpiresAt: expiresAt,
+      extra: { source: 'job_completion' }
     });
     
     if (!skipUsageTracking) {
       await trackUsage(userEmail, files.length, totalPageCount);
     }
     
-    logger.info('Job completed', { jobId, userEmail, fileCount: files.length, pageCount: totalPageCount });
+    const elapsed = Date.now() - startTime;
+    logger.info('Job completed', { jobId, userEmail, fileCount: files.length, pageCount: totalPageCount, elapsedMs: elapsed });
     
     // Deliver webhook if URL was provided
     if (webhookUrl) {
@@ -820,9 +904,11 @@ async function processJobInBackground(jobId, userEmail, files, skipUsageTracking
         event: 'job.completed',
         job_id: jobId,
         status: 'complete',
-        download_url: downloadUrl,
+        download_url: signedUrl,
+        download_expires_at: expiresAt,
+        authenticated_download_url: `https://broker-standard-api-new.onrender.com/download/${jobId}`,
         file_count: files.length,
-        elapsed_ms: Date.now() - startTime,
+        elapsed_ms: elapsed,
         completed_at: new Date().toISOString()
       });
     }
@@ -991,25 +1077,165 @@ app.get("/job-status/:jobId", async (req, res) => {
       }
     }
     
-    const response = {
-      job_id: job.id,
-      status: job.status,
-      progress: job.progress,
-      download_url: job.download_url,
-      created_at: job.created_at,
-      completed_at: job.completed_at,
-      error_message: job.error_message
-    };
-    
-    if (job.status === 'complete' && job.download_url) {
-      response.message = 'Ready for download. Files expire after 1 hour.';
+    // If complete and has storage path (file still exists)
+    if (job.status === 'complete' && job.storage_path) {
+      const { data: files } = await supabase.storage
+        .from('broker-job-results')
+        .list('', { search: job.storage_path });
+      
+      const fileExists = files && files.length > 0;
+      
+      if (fileExists) {
+        // Generate a FRESH signed URL on every poll
+        const { signedUrl, expiresAt } = await generateSignedUrl(job.storage_path);
+        
+        await logFileAccess(job.id, job.user_email, 'link_generated', {
+          ip: req.ip,
+          signedUrlExpiresAt: expiresAt,
+          extra: { source: 'job_status_poll' }
+        });
+        
+        res.json({
+          job_id: job.id,
+          status: job.status,
+          download_url: signedUrl,
+          download_expires_at: expiresAt,
+          authenticated_download_url: `https://broker-standard-api-new.onrender.com/download/${job.id}`,
+          message: `Ready for download. Signed link expires in ${SIGNED_URL_EXPIRY_SECONDS / 60} minutes. For logged/authenticated downloads, use the authenticated_download_url with your Bearer token.`,
+          created_at: job.created_at,
+          completed_at: job.completed_at
+        });
+      } else {
+        res.json({
+          job_id: job.id,
+          status: job.status,
+          download_url: null,
+          message: 'File has been downloaded and removed, or has expired.',
+          created_at: job.created_at,
+          completed_at: job.completed_at
+        });
+      }
+      
+    } else if (job.status === 'error') {
+      res.json({
+        job_id: job.id,
+        status: job.status,
+        error_message: job.error_message,
+        created_at: job.created_at,
+        completed_at: job.completed_at
+      });
+    } else {
+      res.json({
+        job_id: job.id,
+        status: job.status,
+        progress: job.progress,
+        created_at: job.created_at
+      });
     }
-    
-    res.json(response);
     
   } catch (err) {
     logger.error('Error fetching job status', { error: err.message });
     res.status(500).json({ error: 'Failed to fetch job status' });
+  }
+});
+
+// Authenticated download — proxies file through the API with logging
+app.get("/download/:jobId", async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    
+    // Require Bearer token
+    const authHeader = req.headers["authorization"];
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ error: 'Missing authorization header' });
+    }
+    
+    const token = authHeader.split(" ")[1];
+    if (token !== process.env.AQUAMARK_API_KEY) {
+      await logFileAccess(jobId, 'unknown', 'download_denied', {
+        ip: req.ip,
+        extra: { reason: 'invalid_api_key' }
+      });
+      return res.status(401).json({ error: 'Invalid API key' });
+    }
+    
+    // Look up the job
+    const { data: job, error } = await supabase
+      .from('broker_jobs')
+      .select('id, user_email, storage_path, status')
+      .eq('id', jobId)
+      .single();
+    
+    if (error || !job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+    
+    if (job.status !== 'complete') {
+      return res.status(400).json({ error: 'Job is not complete', status: job.status });
+    }
+    
+    if (!job.storage_path) {
+      return res.status(410).json({ error: 'File has already been downloaded and removed, or has expired' });
+    }
+    
+    // Download the file from Supabase storage
+    const { data: fileData, error: downloadError } = await supabase.storage
+      .from('broker-job-results')
+      .download(job.storage_path);
+    
+    if (downloadError) {
+      logger.error('Storage download failed', { jobId, error: downloadError.message });
+      return res.status(500).json({ error: 'Failed to retrieve file from storage' });
+    }
+    
+    // Convert to buffer
+    const buffer = Buffer.from(await fileData.arrayBuffer());
+    
+    // Log the successful download
+    await logFileAccess(jobId, job.user_email, 'file_downloaded', {
+      ip: req.ip,
+      extra: { file_size_bytes: buffer.length }
+    });
+    
+    logger.info('File downloaded via authenticated endpoint', { 
+      jobId, 
+      userEmail: job.user_email,
+      fileSize: buffer.length,
+      ip: req.ip
+    });
+    
+    // Determine content type from storage path
+    const isZip = job.storage_path.endsWith('.zip');
+    const contentType = isZip ? 'application/zip' : 'application/pdf';
+    const filename = isZip ? `${jobId}.zip` : `${jobId}.pdf`;
+    
+    // Stream the file to the client
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', buffer.length);
+    res.send(buffer);
+    
+    // Auto-delete file from storage after successful download
+    try {
+      await deleteFromStorage(job.storage_path);
+      await supabase
+        .from('broker_jobs')
+        .update({ storage_path: null, download_url: null })
+        .eq('id', jobId);
+      
+      await logFileAccess(jobId, job.user_email, 'file_deleted', {
+        ip: req.ip,
+        extra: { source: 'auto_delete_after_download' }
+      });
+      
+      logger.info('File auto-deleted after download', { jobId });
+    } catch (delErr) {
+      logger.error('Auto-delete after download failed', { jobId, error: delErr.message });
+    }
+    
+  } catch (err) {
+    logger.error('Download endpoint error', { error: err.message, jobId: req.params.jobId });
+    res.status(500).json({ error: 'Failed to process download' });
   }
 });
 
@@ -1091,5 +1317,5 @@ app.listen(PORT, () => {
   });
   console.log(`🚀 Aquamark Broker API v2 on port ${PORT}`);
   console.log(`📦 Cache limits: ${MAX_LOGO_CACHE_SIZE} logos, ${MAX_TEXT_CACHE_SIZE} text images`);
-  console.log(`✨ Features: Base64 + URL input, Multi-file support, Async processing`);
+  console.log(`🔒 Signed URLs: ${SIGNED_URL_EXPIRY_SECONDS / 60} min expiry | Auto-cleanup: 30 min | Log retention: ${LOG_RETENTION_DAYS} days`);
 });
