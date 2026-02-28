@@ -1,4 +1,4 @@
-FROM node:20-slim
+FROM node:22-slim
 
 # Install qpdf and dependencies for canvas
 RUN apt-get update && apt-get install -y \
