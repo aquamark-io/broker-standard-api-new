@@ -310,7 +310,10 @@ const apiLimiter = rateLimit({
 });
 
 app.set('trust proxy', true);
-app.use(helmet());
+app.use(helmet({
+  contentSecurityPolicy: false,
+  frameguard: false,
+}));
 app.use(compression());
 app.use(express.json({ limit: '200mb' })); // Support base64
 app.use(cors());
