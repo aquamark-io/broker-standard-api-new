@@ -1283,6 +1283,9 @@ app.post("/clear-cache", (req, res) => {
   });
 });
 
+const { mountGhlRoutes } = require('./ghl-integration');
+mountGhlRoutes(app, supabase, logger);
+
 // ============================================
 // GLOBAL ERROR HANDLER
 // ============================================
@@ -1310,8 +1313,7 @@ app.use((req, res) => {
 // ============================================
 // START SERVER
 // ============================================
-const { mountGhlRoutes } = require('./ghl-integration');
-mountGhlRoutes(app, supabase, logger);
+
 
 app.listen(PORT, () => {
   logger.info('Server started', { 
