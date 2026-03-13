@@ -604,10 +604,13 @@ function mountGhlRoutes(app, supabase, logger, helpers = {}) {
   });
 
   // Custom Page UI
-  app.get('/ghl/app', (req, res) => {
+app.get('/ghl/app', (req, res) => {
+    res.removeHeader('X-Frame-Options');
     res.setHeader('Content-Type', 'text/html');
+    res.setHeader('Content-Security-Policy', "frame-ancestors *");
+    res.setHeader('X-Frame-Options', 'ALLOWALL');
     res.send(getCustomPageHtml());
-  });
+});
 
   // Check Setup (logo exists?)
   app.post('/ghl/app/check-setup', async (req, res) => {
