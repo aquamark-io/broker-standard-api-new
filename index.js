@@ -313,6 +313,9 @@ app.set('trust proxy', true);
 app.use(helmet({
   contentSecurityPolicy: false,
   frameguard: false,
+  crossOriginOpenerPolicy: false,
+  crossOriginResourcePolicy: false,
+  crossOriginEmbedderPolicy: false,
 }));
 app.use(compression());
 app.use(express.json({ limit: '200mb' })); // Support base64
