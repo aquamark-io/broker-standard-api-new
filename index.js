@@ -1310,6 +1310,9 @@ app.use((req, res) => {
 // ============================================
 // START SERVER
 // ============================================
+const { mountGhlRoutes } = require('./ghl-integration');
+mountGhlRoutes(app, supabase, logger);
+
 app.listen(PORT, () => {
   logger.info('Server started', { 
     port: PORT,
