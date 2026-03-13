@@ -1,31 +1,14 @@
 // ============================================
-// GoHighLevel (GHL) Marketplace App Integration
+// GoHighLevel (GHL) Marketplace App Integration v3
 // ============================================
 //
-// v2: Includes OAuth, Custom Page with SSO, logo upload, and watermarking.
-//
-// SETUP:
-//   1. Env vars on Render:
-//      - GHL_CLIENT_ID
-//      - GHL_CLIENT_SECRET
-//      - GHL_SHARED_SECRET
-//
-//   2. In your index.js, mount with:
-//      const { mountGhlRoutes } = require('./ghl-integration');
-//      mountGhlRoutes(app, supabase, logger, { watermarkPdf, getCachedLogo });
-//
-//   3. npm install crypto-js multer
-//
-//   4. Add user_email column to ghl_tokens:
-//      ALTER TABLE ghl_tokens ADD COLUMN IF NOT EXISTS user_email TEXT;
-//
-//   5. Set Custom Page URL in GHL Marketplace app (Modules > Custom Page):
-//      https://broker-standard-api-new.onrender.com/ghl/app
+// In your index.js, mount with:
+//   const { mountGhlRoutes } = require('./ghl-integration');
+//   mountGhlRoutes(app, supabase, logger, { watermarkPdf, getCachedLogo });
 // ============================================
 
 const crypto = require('crypto');
 const fetch = require('node-fetch');
-const CryptoJS = require('crypto-js');
 
 const GHL_API_BASE = 'https://services.leadconnectorhq.com';
 
@@ -47,17 +30,11 @@ async function exchangeCodeForToken(code) {
     method: 'POST',
     headers: { 'Accept': 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
-      client_id: config.clientId,
-      client_secret: config.clientSecret,
-      grant_type: 'authorization_code',
-      code,
-      user_type: 'Location',
+      client_id: config.clientId, client_secret: config.clientSecret,
+      grant_type: 'authorization_code', code, user_type: 'Location',
     }).toString(),
   });
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Token exchange failed (${response.status}): ${errorText}`);
-  }
+  if (!response.ok) throw new Error(`Token exchange failed (${response.status}): ${await response.text()}`);
   return await response.json();
 }
 
@@ -67,71 +44,36 @@ async function refreshAccessToken(refreshToken) {
     method: 'POST',
     headers: { 'Accept': 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
-      client_id: config.clientId,
-      client_secret: config.clientSecret,
-      grant_type: 'refresh_token',
-      refresh_token: refreshToken,
-      user_type: 'Location',
+      client_id: config.clientId, client_secret: config.clientSecret,
+      grant_type: 'refresh_token', refresh_token: refreshToken, user_type: 'Location',
     }).toString(),
   });
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Token refresh failed (${response.status}): ${errorText}`);
-  }
+  if (!response.ok) throw new Error(`Token refresh failed (${response.status}): ${await response.text()}`);
   return await response.json();
 }
 
 async function storeTokens(supabase, logger, tokenData, locationId, companyId) {
   const expiresAt = new Date(Date.now() + (tokenData.expires_in * 1000)).toISOString();
-  const { error } = await supabase
-    .from('ghl_tokens')
-    .upsert({
-      location_id: locationId,
-      company_id: companyId || null,
-      access_token: tokenData.access_token,
-      refresh_token: tokenData.refresh_token,
-      token_type: tokenData.token_type || 'Bearer',
-      expires_at: expiresAt,
-      scopes: tokenData.scope || null,
-      user_type: tokenData.userType || 'Location',
-      updated_at: new Date().toISOString(),
-    }, { onConflict: 'location_id' });
-  if (error) {
-    logger.error('Failed to store GHL tokens', { locationId, error: error.message });
-    throw error;
-  }
+  const { error } = await supabase.from('ghl_tokens').upsert({
+    location_id: locationId, company_id: companyId || null,
+    access_token: tokenData.access_token, refresh_token: tokenData.refresh_token,
+    token_type: tokenData.token_type || 'Bearer', expires_at: expiresAt,
+    scopes: tokenData.scope || null, user_type: tokenData.userType || 'Location',
+    updated_at: new Date().toISOString(),
+  }, { onConflict: 'location_id' });
+  if (error) { logger.error('Failed to store GHL tokens', { locationId, error: error.message }); throw error; }
   logger.info('GHL tokens stored', { locationId, expiresAt });
 }
 
 async function getValidToken(supabase, logger, locationId) {
-  const { data: tokenRow, error } = await supabase
-    .from('ghl_tokens')
-    .select('*')
-    .eq('location_id', locationId)
-    .single();
+  const { data: tokenRow, error } = await supabase.from('ghl_tokens').select('*').eq('location_id', locationId).single();
   if (error || !tokenRow) throw new Error(`No GHL tokens found for location: ${locationId}`);
-
   const bufferMs = 5 * 60 * 1000;
-  if (Date.now() < (new Date(tokenRow.expires_at).getTime() - bufferMs)) {
-    return tokenRow.access_token;
-  }
-
+  if (Date.now() < (new Date(tokenRow.expires_at).getTime() - bufferMs)) return tokenRow.access_token;
   logger.info('GHL token expired, refreshing', { locationId });
   const newTokenData = await refreshAccessToken(tokenRow.refresh_token);
   await storeTokens(supabase, logger, newTokenData, locationId, tokenRow.company_id);
   return newTokenData.access_token;
-}
-
-// ============================================
-// SSO DECRYPTION
-// ============================================
-
-function decryptSsoData(encryptedData) {
-  const config = getGhlConfig();
-  const decrypted = CryptoJS.AES.decrypt(encryptedData, config.sharedSecret);
-  const jsonStr = decrypted.toString(CryptoJS.enc.Utf8);
-  if (!jsonStr) throw new Error('SSO decryption produced empty result');
-  return JSON.parse(jsonStr);
 }
 
 // ============================================
@@ -143,10 +85,7 @@ async function listGhlMedia(accessToken) {
   const response = await fetch(`${GHL_API_BASE}/medias/files?${params.toString()}`, {
     headers: { 'Authorization': `Bearer ${accessToken}`, 'Version': '2021-07-28', 'Accept': 'application/json' },
   });
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Failed to list GHL media (${response.status}): ${errorText}`);
-  }
+  if (!response.ok) throw new Error(`Failed to list GHL media (${response.status}): ${await response.text()}`);
   return await response.json();
 }
 
@@ -169,10 +108,7 @@ async function uploadToGhlMedia(accessToken, fileBuffer, filename) {
     headers: { 'Authorization': `Bearer ${accessToken}`, 'Version': '2021-07-28', ...form.getHeaders() },
     body: form,
   });
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`GHL media upload failed (${response.status}): ${errorText}`);
-  }
+  if (!response.ok) throw new Error(`GHL media upload failed (${response.status}): ${await response.text()}`);
   return await response.json();
 }
 
@@ -183,46 +119,31 @@ async function uploadToGhlMedia(accessToken, fileBuffer, filename) {
 async function ensureAquamarkUser(supabase, logger, email) {
   const { data: existing } = await supabase.from('users').select('id, email, plan').eq('email', email).single();
   if (existing) return existing;
-
-  const { data: newUser, error } = await supabase
-    .from('users')
-    .insert({ email, plan: 'Standard', created_at: new Date().toISOString() })
-    .select()
-    .single();
-  if (error) {
-    logger.error('Failed to create Aquamark user', { email, error: error.message });
-    throw error;
-  }
-  logger.info('Created Aquamark user from GHL install', { email, plan: 'Standard' });
+  const { data: newUser, error } = await supabase.from('users')
+    .insert({ email, plan: 'Standard', created_at: new Date().toISOString() }).select().single();
+  if (error) { logger.error('Failed to create Aquamark user', { email, error: error.message }); throw error; }
+  logger.info('Created Aquamark user from GHL', { email });
   return newUser;
 }
 
 async function checkLogoExists(supabase, email) {
   const { data: logoList } = await supabase.storage.from('logos').list(email);
   if (!logoList || logoList.length === 0) return false;
-  const actualLogos = logoList.filter(file =>
-    !file.name.includes('emptyFolderPlaceholder') &&
-    !file.name.includes('.emptyFolderPlaceholder') &&
-    (file.name.includes('logo-') || file.name.endsWith('.png') || file.name.endsWith('.jpg'))
-  );
-  return actualLogos.length > 0;
+  return logoList.filter(f =>
+    !f.name.includes('emptyFolderPlaceholder') && !f.name.includes('.emptyFolderPlaceholder') &&
+    (f.name.includes('logo-') || f.name.endsWith('.png') || f.name.endsWith('.jpg'))
+  ).length > 0;
 }
 
 async function uploadLogo(supabase, logger, email, fileBuffer, originalName) {
   const ext = originalName.split('.').pop() || 'png';
   const filename = `logo-${Date.now()}.${ext}`;
   const storagePath = `${email}/${filename}`;
-  const { error } = await supabase.storage
-    .from('logos')
-    .upload(storagePath, fileBuffer, {
-      contentType: ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : 'image/png',
-      upsert: true,
-    });
-  if (error) {
-    logger.error('Logo upload failed', { email, error: error.message });
-    throw error;
-  }
-  logger.info('Logo uploaded for GHL user', { email, storagePath });
+  const { error } = await supabase.storage.from('logos').upload(storagePath, fileBuffer, {
+    contentType: ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : 'image/png', upsert: true,
+  });
+  if (error) { logger.error('Logo upload failed', { email, error: error.message }); throw error; }
+  logger.info('Logo uploaded', { email, storagePath });
   return storagePath;
 }
 
@@ -230,7 +151,7 @@ async function uploadLogo(supabase, logger, email, fileBuffer, originalName) {
 // CUSTOM PAGE HTML
 // ============================================
 
-function getCustomPageHtml() {
+function getCustomPageHtml(locationId) {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -247,7 +168,6 @@ function getCustomPageHtml() {
     .status-bar.visible{display:block}
     .status-bar.success{background:#f0fdf4;border:1px solid #bbf7d0;color:#166534}
     .status-bar.error{background:#fef2f2;border:1px solid #fecaca;color:#991b1b}
-    .status-bar.info{background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af}
     .setup-section{background:white;border-radius:12px;padding:40px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.06)}
     .setup-section h2{font-size:18px;margin-bottom:8px}
     .setup-section p{color:#6b7280;margin-bottom:24px;font-size:14px;line-height:1.5}
@@ -298,11 +218,7 @@ function getCustomPageHtml() {
   <div class="container">
     <div class="header"><h1>Aquamark Watermarking</h1></div>
     <div id="statusBar" class="status-bar"></div>
-
-    <div id="loadingState" class="loading">
-      <div class="spinner"></div>
-      <p>Connecting to your account...</p>
-    </div>
+    <div id="loadingState" class="loading"><div class="spinner"></div><p>Connecting to your account...</p></div>
 
     <div id="setupSection" class="setup-section" style="display:none">
       <h2>Upload Your Logo</h2>
@@ -347,46 +263,54 @@ function getCustomPageHtml() {
   let files = [];
   let selectedIds = new Set();
   const API_BASE = window.location.origin;
+  const SERVER_LOCATION_ID = '${locationId || ''}';
 
-  // SSO: listen for user context from GHL parent
-  window.addEventListener('message', async (event) => {
-    if (event.data && event.data.message === 'REQUEST_USER_DATA_RESPONSE') {
-      try {
-        const res = await fetch(API_BASE + '/ghl/sso/decrypt', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ encrypted: event.data.data }),
-        });
-        if (!res.ok) throw new Error('SSO decryption failed');
-        sessionData = await res.json();
-        initialize();
-      } catch (err) {
-        showStatus('Failed to authenticate: ' + err.message, 'error');
+  function getLocationId() {
+    if (SERVER_LOCATION_ID) return SERVER_LOCATION_ID;
+    const params = new URLSearchParams(window.location.search);
+    return params.get('locationId') || params.get('location_id') || '';
+  }
+
+  (async function() {
+    const locId = getLocationId();
+    if (locId) {
+      sessionData = { activeLocation: locId };
+      initialize();
+      return;
+    }
+
+    // Fallback: try SSO postMessage from GHL parent
+    window.addEventListener('message', async (event) => {
+      if (event.data && event.data.message === 'REQUEST_USER_DATA_RESPONSE') {
+        try {
+          const res = await fetch(API_BASE + '/ghl/sso/decrypt', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ encrypted: event.data.data }),
+          });
+          if (!res.ok) throw new Error('SSO failed');
+          sessionData = await res.json();
+          initialize();
+        } catch (err) {
+          showStatus('Authentication error: ' + err.message, 'error');
+          document.getElementById('loadingState').style.display = 'none';
+        }
+      }
+    });
+    window.parent.postMessage({ message: 'REQUEST_USER_DATA' }, '*');
+
+    setTimeout(() => {
+      if (!sessionData) {
+        showStatus('Unable to connect. Please reload the page or reinstall the app.', 'error');
         document.getElementById('loadingState').style.display = 'none';
       }
-    }
-  });
-
-  // Request SSO data
-  window.parent.postMessage({ message: 'REQUEST_USER_DATA' }, '*');
-
-  // Fallback for testing outside GHL iframe
-  setTimeout(() => {
-    if (!sessionData) {
-      const params = new URLSearchParams(window.location.search);
-      const loc = params.get('locationId');
-      if (loc) { sessionData = { activeLocation: loc }; initialize(); }
-      else {
-        showStatus('Unable to connect. Please reload the page or try again from within GoHighLevel.', 'error');
-        document.getElementById('loadingState').style.display = 'none';
-      }
-    }
-  }, 3000);
+    }, 5000);
+  })();
 
   async function initialize() {
     document.getElementById('loadingState').style.display = 'none';
     try {
-      const locId = sessionData.locationId || sessionData.activeLocation;
+      const locId = sessionData.activeLocation || sessionData.locationId;
       const res = await fetch(API_BASE + '/ghl/app/check-setup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -406,7 +330,6 @@ function getCustomPageHtml() {
   const uploadZone = document.getElementById('uploadZone');
   const logoInput = document.getElementById('logoInput');
   let selectedLogoFile = null;
-
   uploadZone.addEventListener('click', () => logoInput.click());
   uploadZone.addEventListener('dragover', (e) => { e.preventDefault(); uploadZone.classList.add('dragover'); });
   uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
@@ -427,7 +350,7 @@ function getCustomPageHtml() {
     const btn = document.getElementById('uploadLogoBtn');
     btn.disabled = true; btn.textContent = 'Uploading...';
     try {
-      const locId = sessionData.locationId || sessionData.activeLocation;
+      const locId = sessionData.activeLocation || sessionData.locationId;
       const fd = new FormData();
       fd.append('logo', selectedLogoFile);
       fd.append('location_id', locId);
@@ -448,10 +371,9 @@ function getCustomPageHtml() {
     const list = document.getElementById('fileList');
     list.innerHTML = '<div class="loading"><div class="spinner"></div><p>Loading files...</p></div>';
     try {
-      const locId = sessionData.locationId || sessionData.activeLocation;
+      const locId = sessionData.activeLocation || sessionData.locationId;
       const res = await fetch(API_BASE + '/ghl/app/files', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ location_id: locId }),
       });
       const data = await res.json();
@@ -498,14 +420,13 @@ function getCustomPageHtml() {
     overlay.classList.add('visible');
     const ids = Array.from(selectedIds);
     let completed = 0, errors = [];
-    const locId = sessionData.locationId || sessionData.activeLocation;
+    const locId = sessionData.activeLocation || sessionData.locationId;
     for (const id of ids) {
       const file = files.find(f => f.id === id);
       detail.textContent = 'Processing ' + (completed + 1) + ' of ' + ids.length + ': ' + (file ? file.name : '');
       try {
         const res = await fetch(API_BASE + '/ghl/app/watermark', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ location_id: locId, file_id: id, file_name: file ? file.name : 'document.pdf', file_url: file ? file.url : null }),
         });
         if (!res.ok) { const err = await res.json(); errors.push((file ? file.name : id) + ': ' + (err.error || 'Failed')); }
@@ -577,7 +498,7 @@ function mountGhlRoutes(app, supabase, logger, helpers = {}) {
     }
   });
 
-  // Webhook Receiver
+  // Webhook
   app.post('/ghl/webhook', async (req, res) => {
     try {
       res.status(200).json({ received: true });
@@ -589,38 +510,57 @@ function mountGhlRoutes(app, supabase, logger, helpers = {}) {
     } catch (err) { logger.error('GHL webhook error', { error: err.message }); }
   });
 
-  // SSO Decrypt
+  // SSO Decrypt (kept as fallback)
   app.post('/ghl/sso/decrypt', async (req, res) => {
     try {
       const { encrypted } = req.body;
       if (!encrypted) return res.status(400).json({ error: 'No encrypted data' });
-      const userData = decryptSsoData(encrypted);
-      logger.info('GHL SSO decrypted', { userId: userData.userId, location: userData.activeLocation });
-      res.json(userData);
+      const CryptoJS = require('crypto-js');
+      const config = getGhlConfig();
+      const decrypted = CryptoJS.AES.decrypt(encrypted, config.sharedSecret);
+      const jsonStr = decrypted.toString(CryptoJS.enc.Utf8);
+      if (!jsonStr) throw new Error('Decryption produced empty result');
+      res.json(JSON.parse(jsonStr));
     } catch (err) {
       logger.error('SSO decrypt error', { error: err.message });
       res.status(401).json({ error: 'SSO authentication failed' });
     }
   });
 
-  // Custom Page UI
-app.get('/ghl/app', (req, res) => {
+  // Custom Page — serves the UI inside GHL iframe
+  app.get('/ghl/app', async (req, res) => {
     res.removeHeader('X-Frame-Options');
     res.setHeader('Content-Type', 'text/html');
-    res.setHeader('Content-Security-Policy', "frame-ancestors *");
+    res.setHeader('Content-Security-Policy', 'frame-ancestors *');
     res.setHeader('X-Frame-Options', 'ALLOWALL');
-    res.send(getCustomPageHtml());
-});
 
-  // Check Setup (logo exists?)
+    // Try to determine locationId from query params or by looking up from token
+    let locationId = req.query.locationId || req.query.location_id || '';
+
+    // If no locationId in URL, try to find it from the referrer or default to the first connected location
+    if (!locationId) {
+      try {
+        const { data: tokens } = await supabase.from('ghl_tokens')
+          .select('location_id').order('installed_at', { ascending: false }).limit(1);
+        if (tokens && tokens.length > 0) {
+          locationId = tokens[0].location_id;
+          logger.info('Custom page: using most recent location', { locationId });
+        }
+      } catch (e) {
+        logger.warn('Custom page: could not look up location', { error: e.message });
+      }
+    }
+
+    res.send(getCustomPageHtml(locationId));
+  });
+
+  // Check Setup
   app.post('/ghl/app/check-setup', async (req, res) => {
     try {
       const { location_id } = req.body;
       if (!location_id) return res.status(400).json({ error: 'location_id required' });
-
       const { data: tokenRow } = await supabase.from('ghl_tokens').select('user_email').eq('location_id', location_id).single();
       if (!tokenRow || !tokenRow.user_email) return res.json({ needs_logo: true, needs_email: true });
-
       const hasLogo = await checkLogoExists(supabase, tokenRow.user_email);
       res.json({ needs_logo: !hasLogo, email: tokenRow.user_email });
     } catch (err) {
@@ -634,11 +574,9 @@ app.get('/ghl/app', (req, res) => {
     try {
       const multer = require('multer');
       const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024 } }).single('logo');
-
       upload(req, res, async (err) => {
         if (err) return res.status(400).json({ error: 'Upload failed: ' + err.message });
         if (!req.file) return res.status(400).json({ error: 'No file provided' });
-
         const locationId = req.body.location_id;
         if (!locationId) return res.status(400).json({ error: 'location_id required' });
 
@@ -659,7 +597,7 @@ app.get('/ghl/app', (req, res) => {
           } catch (e) { logger.warn('Could not fetch location email', { error: e.message }); }
         }
 
-        if (!email) return res.status(400).json({ error: 'Could not determine account email. Please contact support@aquamark.io.' });
+        if (!email) return res.status(400).json({ error: 'Could not determine account email. Contact support@aquamark.io.' });
 
         await ensureAquamarkUser(supabase, logger, email);
         await uploadLogo(supabase, logger, email, req.file.buffer, req.file.originalname);
@@ -676,15 +614,12 @@ app.get('/ghl/app', (req, res) => {
     try {
       const { location_id } = req.body;
       if (!location_id) return res.status(400).json({ error: 'location_id required' });
-
       const ghlToken = await getValidToken(supabase, logger, location_id);
       const mediaData = await listGhlMedia(ghlToken);
-
       const pdfFiles = (mediaData.files || []).filter(f => {
         const name = (f.name || '').toLowerCase();
         return name.endsWith('.pdf') && !name.includes('protected');
       });
-
       res.json({
         files: pdfFiles.map(f => ({ id: f.id, name: f.name, url: f.url, size: f.size, createdAt: f.createdAt })),
         total: pdfFiles.length,
@@ -700,10 +635,7 @@ app.get('/ghl/app', (req, res) => {
     try {
       const { location_id, file_name, file_url } = req.body;
       if (!location_id || !file_url) return res.status(400).json({ error: 'location_id and file_url required' });
-
-      if (!watermarkPdf || !getCachedLogo) {
-        return res.status(500).json({ error: 'Watermarking not configured. Check server setup.' });
-      }
+      if (!watermarkPdf || !getCachedLogo) return res.status(500).json({ error: 'Watermarking not configured.' });
 
       const { data: tokenRow } = await supabase.from('ghl_tokens').select('user_email').eq('location_id', location_id).single();
       if (!tokenRow || !tokenRow.user_email) return res.status(400).json({ error: 'Please upload your logo first.' });
@@ -720,7 +652,6 @@ app.get('/ghl/app', (req, res) => {
       const protectedName = baseName + ' protected.pdf';
 
       await uploadToGhlMedia(ghlToken, Buffer.from(watermarkedBuffer), protectedName);
-
       logger.info('GHL watermark complete', { locationId: location_id, fileName: protectedName, email });
       res.json({ success: true, filename: protectedName });
     } catch (err) {
@@ -729,7 +660,7 @@ app.get('/ghl/app', (req, res) => {
     }
   });
 
-  // Status check
+  // Status
   app.get('/ghl/status/:locationId', async (req, res) => {
     try {
       const authHeader = req.headers['authorization'];
@@ -743,7 +674,7 @@ app.get('/ghl/app', (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
-  // List connections
+  // Connections
   app.get('/ghl/connections', async (req, res) => {
     try {
       const authHeader = req.headers['authorization'];
@@ -756,7 +687,7 @@ app.get('/ghl/app', (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
-  logger.info('GHL integration routes mounted (v2 with Custom Page)', {
+  logger.info('GHL integration routes mounted (v3)', {
     routes: ['GET /ghl/oauth/callback', 'POST /ghl/webhook', 'POST /ghl/sso/decrypt',
       'GET /ghl/app', 'POST /ghl/app/check-setup', 'POST /ghl/app/upload-logo',
       'POST /ghl/app/files', 'POST /ghl/app/watermark',
