@@ -1284,7 +1284,7 @@ app.post("/clear-cache", (req, res) => {
 });
 
 const { mountGhlRoutes } = require('./ghl-integration');
-mountGhlRoutes(app, supabase, logger);
+mountGhlRoutes(app, supabase, logger, { watermarkPdf, getCachedLogo });
 
 // ============================================
 // GLOBAL ERROR HANDLER
