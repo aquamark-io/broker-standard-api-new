@@ -310,13 +310,7 @@ const apiLimiter = rateLimit({
 });
 
 app.set('trust proxy', true);
-app.use(helmet({
-  contentSecurityPolicy: false,
-  frameguard: false,
-  crossOriginOpenerPolicy: false,
-  crossOriginResourcePolicy: false,
-  crossOriginEmbedderPolicy: false,
-}));
+app.use(helmet());
 app.use(compression());
 app.use(express.json({ limit: '200mb' })); // Support base64
 app.use(cors());
@@ -1289,9 +1283,6 @@ app.post("/clear-cache", (req, res) => {
   });
 });
 
-const { mountGhlRoutes } = require('./ghl-integration');
-mountGhlRoutes(app, supabase, logger, { watermarkPdf, getCachedLogo });
-
 // ============================================
 // GLOBAL ERROR HANDLER
 // ============================================
@@ -1319,8 +1310,6 @@ app.use((req, res) => {
 // ============================================
 // START SERVER
 // ============================================
-
-
 app.listen(PORT, () => {
   logger.info('Server started', { 
     port: PORT,
