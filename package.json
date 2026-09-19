@@ -11,7 +11,7 @@
   "license": "ISC",
   "dependencies": {
     "@supabase/supabase-js": "^2.101.1",
-    "adm-zip": "^0.6.0",
+    "adm-zip": "^0.6.1",
     "compression": "^1.8.1",
     "cors": "^2.8.6",
     "express": "^5.2.1",
